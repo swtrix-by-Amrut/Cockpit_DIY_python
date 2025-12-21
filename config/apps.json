@@ -1,0 +1,13 @@
+{
+  "apps": [
+    {
+      "name": "qbittorrent",
+      "display_name": "qBittorrent",
+      "start_command": "sudo systemctl start qbittorrent",
+      "stop_command": "sudo systemctl stop qbittorrent",
+      "status_command": "systemctl is-active qbittorrent",
+      "type": "systemd"
+    }
+    
+  ]
+}

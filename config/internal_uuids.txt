@@ -1,0 +1,16 @@
+# Internal Drive Configuration
+# Format: UUID,show_flag
+# 
+# UUID: The UUID of the internal partition
+# show_flag: true to show in storage page (no mount buttons), false to hide completely
+#
+# Examples:
+# 12345678-90ab-cdef-1234-567890abcdef,true   <- Shows in UI but no mount buttons
+# abcdef12-3456-7890-abcd-ef1234567890,false  <- Hidden from UI completely
+#
+# To get UUIDs, run: lsblk -o NAME,UUID
+#
+# Add your internal drive UUIDs below:
+
+03CC-AFA2,false
+2c914794-c2d6-435a-9a3b-895ace6c3328,true
