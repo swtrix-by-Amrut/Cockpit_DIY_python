@@ -194,7 +194,25 @@ class StorageManager:
         if code != 0:
             return {'success': False, 'error': f'Unmount failed: {stderr}'}
         
-        return {'success': True}
+        # Clean up: Remove the mount directory if it's in our managed paths
+        managed_paths = [self.mount_base, self.mount_base_private, self.mount_base_public]
+        should_cleanup = any(mountpoint.startswith(path) for path in managed_paths)
+        
+        if should_cleanup:
+            try:
+                # Check if directory is empty before removing
+                if os.path.exists(mountpoint) and os.path.isdir(mountpoint):
+                    # Try to remove the directory
+                    if not os.listdir(mountpoint):  # Directory is empty
+                        os.rmdir(mountpoint)
+                    else:
+                        # Directory not empty, try with sudo
+                        self._run_command(f"sudo rmdir {mountpoint}")
+            except Exception as e:
+                # Log but don't fail the unmount operation
+                print(f"Warning: Could not remove mount directory {mountpoint}: {e}")
+        
+        return {'success': True, 'message': f'Unmounted and cleaned up {mountpoint}'}
 
 
 # Standalone test
