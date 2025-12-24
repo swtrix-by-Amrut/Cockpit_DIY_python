@@ -34,6 +34,15 @@ import json
 import threading
 import queue
 
+# Keep these imports at the top
+import pty
+import os
+import select
+import subprocess
+import threading
+import json
+
+
 
 active_terminals = {}
 
@@ -306,133 +315,128 @@ def htop_stream():
                 time.sleep(2)
     
     return Response(generate(), mimetype='text/event-stream')
-    
-@app.route('/api/terminal/connect/<session_name>')
+
+@app.route('/api/terminal/start', methods=['POST'])
 @login_required
-def connect_terminal(session_name):
+def start_terminal():
     username = session['username']
-    
-    # Verify session belongs to user
-    prefix = f"cockpit_{username}_"
-    if not session_name.startswith(prefix):
-        return jsonify({'error': 'Invalid session'}), 403
-    
-    # Check if session exists
-    result = subprocess.run(
-        f"tmux has-session -t {session_name} 2>/dev/null",
-        shell=True,
-        capture_output=True
-    )
-    
-    if result.returncode != 0:
-        return jsonify({'error': 'Session does not exist'}), 404
+    session_name = request.json.get('session_name', '')
     
     # Create a unique terminal ID
-    terminal_id = f"{session_name}_{secrets.token_hex(8)}"
+    terminal_id = f"{username}_{secrets.token_hex(8)}"
     
-    # Create bash process attached to tmux session
-    cmd = f"tmux attach-session -t {session_name}"
+    # Fork a PTY
+    pid, fd = pty.fork()
     
-    # Start the process
-    proc = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0
-    )
+    if pid == 0:
+        # Child process - start bash
+        os.execvp('/bin/bash', ['/bin/bash'])
     
-    output_queue = queue.Queue()
-    
-    def read_output():
-        while True:
-            try:
-                char = proc.stdout.read(1)
-                if char:
-                    output_queue.put(char.decode('utf-8', errors='ignore'))
-                else:
-                    break
-            except:
-                break
-    
-    # Start output reading thread
-    thread = threading.Thread(target=read_output, daemon=True)
-    thread.start()
-    
+    # Parent process
     active_terminals[terminal_id] = {
-        'process': proc,
-        'output_queue': output_queue,
-        'thread': thread
+        'pid': pid,
+        'fd': fd,
+        'username': username
     }
     
     return jsonify({'terminal_id': terminal_id, 'success': True})
 
-@app.route('/api/terminal/output/<terminal_id>')
+
+
+@app.route('/api/terminal/read/<terminal_id>')
 @login_required
-def terminal_output(terminal_id):
+def terminal_read(terminal_id):
     if terminal_id not in active_terminals:
-        return jsonify({'error': 'Terminal not found'}), 404
+        return Response('Terminal not found', status=404)
     
     def generate():
-        term_data = active_terminals[terminal_id]
-        output_queue = term_data['output_queue']
+        term_data = active_terminals.get(terminal_id)
+        if not term_data:
+            return
         
-        while terminal_id in active_terminals:
-            try:
-                # Get all available output
-                output = ''
-                try:
-                    while True:
-                        output += output_queue.get(timeout=0.1)
-                except queue.Empty:
-                    pass
+        fd = term_data['fd']
+        
+        try:
+            while terminal_id in active_terminals:
+                # Use select to wait for data
+                r, _, _ = select.select([fd], [], [], 0.1)
                 
-                if output:
-                    yield f"data: {json.dumps({'output': output})}\n\n"
+                if r:
+                    try:
+                        data = os.read(fd, 1024)
+                        if data:
+                            yield f"data: {json.dumps({'output': data.decode('utf-8', errors='ignore')})}\n\n"
+                        else:
+                            break
+                    except OSError:
+                        break
                 else:
-                    yield f"data: {json.dumps({'ping': True})}\n\n"
-                
-                time.sleep(0.05)
-            except:
-                break
+                    # Send keepalive
+                    yield f"data: {json.dumps({'keepalive': True})}\n\n"
+        except:
+            pass
+        finally:
+            if terminal_id in active_terminals:
+                cleanup_terminal(terminal_id)
     
     return Response(generate(), mimetype='text/event-stream')
 
-@app.route('/api/terminal/input/<terminal_id>', methods=['POST'])
+
+@app.route('/api/terminal/write/<terminal_id>', methods=['POST'])
 @login_required
-def terminal_input(terminal_id):
+def terminal_write(terminal_id):
     if terminal_id not in active_terminals:
         return jsonify({'error': 'Terminal not found'}), 404
     
-    data = request.json
-    input_data = data.get('input', '')
-    
+    data = request.json.get('data', '')
     term_data = active_terminals[terminal_id]
-    proc = term_data['process']
+    fd = term_data['fd']
     
     try:
-        proc.stdin.write(input_data.encode('utf-8'))
-        proc.stdin.flush()
+        os.write(fd, data.encode('utf-8'))
         return jsonify({'success': True})
     except:
-        return jsonify({'error': 'Failed to send input'}), 500
+        return jsonify({'error': 'Write failed'}), 500
 
-@app.route('/api/terminal/close/<terminal_id>', methods=['POST'])
+
+
+@app.route('/api/terminal/resize/<terminal_id>', methods=['POST'])
 @login_required
-def close_terminal(terminal_id):
+def terminal_resize(terminal_id):
+    if terminal_id not in active_terminals:
+        return jsonify({'error': 'Terminal not found'}), 404
+    
+    import fcntl
+    import termios
+    import struct
+    
+    rows = request.json.get('rows', 24)
+    cols = request.json.get('cols', 80)
+    
+    term_data = active_terminals[terminal_id]
+    fd = term_data['fd']
+    
+    try:
+        size = struct.pack('HHHH', rows, cols, 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
+        return jsonify({'success': True})
+    except:
+        return jsonify({'error': 'Resize failed'}), 500
+
+def cleanup_terminal(terminal_id):
     if terminal_id in active_terminals:
         term_data = active_terminals[terminal_id]
-        proc = term_data['process']
-        
         try:
-            proc.terminate()
-            proc.wait(timeout=2)
+            os.close(term_data['fd'])
+            os.kill(term_data['pid'], 9)
         except:
-            proc.kill()
-        
+            pass
         del active_terminals[terminal_id]
-    
+
+@app.route('/api/terminal/kill/<terminal_id>', methods=['POST'])
+@login_required
+def kill_terminal(terminal_id):
+    cleanup_terminal(terminal_id)
     return jsonify({'success': True})
 
          

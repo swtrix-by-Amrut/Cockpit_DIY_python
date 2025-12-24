@@ -1,13 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-	
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Server Cockpit</title>
-	<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" />
-	<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
-	<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addons/fit/fit.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <style>
         * {
             margin: 0;
@@ -593,11 +591,11 @@
 				
 				<!-- Terminal display card -->
 				<div class="card" id="terminalCard" style="display: none;">
-					<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; position: relative;">
-						<h3 id="terminalTitle">Session Info: <span id="activeSessionName"></span></h3>
+					<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+						<h3 id="terminalTitle">Terminal: <span id="activeSessionName"></span></h3>
 						<button class="btn btn-danger btn-sm" onclick="closeTerminal()">✕ Close</button>
 					</div>
-					<div id="terminalContainer" style="background: #000; padding: 10px; border-radius: 5px; height: 600px; overflow: auto;"></div>
+					<div id="terminalContainer" style="height: 600px; background: #000;"></div>
 				</div>
 			</div>
             

@@ -422,128 +422,138 @@ async function createSession() {
         showToast('Network error: ' + error.message, true);
     }
 }
-
-
+let currentTerminal = null;
 let currentTerminalId = null;
 let terminalEventSource = null;
 
 async function useSession(sessionName) {
     try {
-        // Close existing terminal if any
-        if (currentTerminalId) {
-            await closeTerminalConnection();
+        // Close existing terminal
+        if (currentTerminal) {
+            closeTerminal();
         }
-        
-        // Connect to terminal
-        const response = await fetch(`/api/terminal/connect/${sessionName}`, {
-            method: 'GET'
-        });
-        
-        const data = await response.json();
-        
-        if (!response.ok) {
-            showToast(data.error || 'Failed to connect', true);
-            return;
-        }
-        
-        currentTerminalId = data.terminal_id;
         
         // Show terminal card
         document.getElementById('terminalCard').style.display = 'block';
         document.getElementById('activeSessionName').textContent = sessionName;
         
-        // Create terminal display
+        // Clear container
         const container = document.getElementById('terminalContainer');
-        container.innerHTML = `
-            <div id="terminalOutput" style="background: #000; color: #0f0; padding: 10px; 
-                 font-family: 'Courier New', monospace; white-space: pre-wrap; 
-                 overflow-y: auto; height: 540px; font-size: 14px;"></div>
-            <div style="display: flex; gap: 5px; margin-top: 10px;">
-                <input type="text" id="terminalInput" 
-                       style="flex: 1; background: #1a1a1a; color: #0f0; border: 1px solid #444; 
-                              padding: 10px; font-family: 'Courier New', monospace; font-size: 14px;"
-                       placeholder="Type command and press Enter...">
-                <button onclick="sendTerminalInput()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">Send</button>
-            </div>
-        `;
+        container.innerHTML = '';
         
-        // Setup input handler
-        const inputField = document.getElementById('terminalInput');
-        inputField.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                sendTerminalInput();
-            }
+        // Create xterm terminal
+        currentTerminal = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: '"Cascadia Code", Menlo, Monaco, "Courier New", monospace',
+            theme: {
+                background: '#000000',
+                foreground: '#ffffff',
+                cursor: '#ffffff',
+                black: '#000000',
+                red: '#ff0000',
+                green: '#00ff00',
+                yellow: '#ffff00',
+                blue: '#0000ff',
+                magenta: '#ff00ff',
+                cyan: '#00ffff',
+                white: '#ffffff',
+                brightBlack: '#808080',
+                brightRed: '#ff0000',
+                brightGreen: '#00ff00',
+                brightYellow: '#ffff00',
+                brightBlue: '#0000ff',
+                brightMagenta: '#ff00ff',
+                brightCyan: '#00ffff',
+                brightWhite: '#ffffff'
+            },
+            rows: 30,
+            cols: 100
         });
         
-        // Focus input
-        inputField.focus();
+        currentTerminal.open(container);
         
-        // Start receiving output
-        terminalEventSource = new EventSource(`/api/terminal/output/${currentTerminalId}`);
+        // Start terminal session
+        const response = await fetch('/api/terminal/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_name: sessionName})
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            showToast('Failed to start terminal', true);
+            return;
+        }
+        
+        currentTerminalId = data.terminal_id;
+        
+        // Handle terminal input
+        currentTerminal.onData(function(data) {
+            fetch(`/api/terminal/write/${currentTerminalId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({data: data})
+            });
+        });
+        
+        // Handle terminal resize
+        currentTerminal.onResize(function(size) {
+            fetch(`/api/terminal/resize/${currentTerminalId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: size.rows, cols: size.cols})
+            });
+        });
+        
+        // Connect to output stream
+        terminalEventSource = new EventSource(`/api/terminal/read/${currentTerminalId}`);
         
         terminalEventSource.onmessage = function(event) {
             const data = JSON.parse(event.data);
             if (data.output) {
-                const output = document.getElementById('terminalOutput');
-                output.textContent += data.output;
-                // Auto-scroll to bottom
-                output.scrollTop = output.scrollHeight;
+                currentTerminal.write(data.output);
             }
         };
         
         terminalEventSource.onerror = function() {
             showToast('Terminal connection lost', true);
-            closeTerminalConnection();
+            closeTerminal();
         };
+        
+        // Focus terminal
+        currentTerminal.focus();
         
     } catch (error) {
         showToast('Error: ' + error.message, true);
     }
 }
 
-async function sendTerminalInput() {
-    const inputField = document.getElementById('terminalInput');
-    const input = inputField.value;
-    
-    if (!input || !currentTerminalId) return;
-    
-    try {
-        const response = await fetch(`/api/terminal/input/${currentTerminalId}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({input: input + '\n'})
-        });
-        
-        if (response.ok) {
-            inputField.value = '';
-        }
-    } catch (error) {
-        showToast('Failed to send input', true);
-    }
-}
-
-async function closeTerminalConnection() {
+function closeTerminal() {
+    // Close event source
     if (terminalEventSource) {
         terminalEventSource.close();
         terminalEventSource = null;
     }
     
+    // Kill terminal on server
     if (currentTerminalId) {
-        try {
-            await fetch(`/api/terminal/close/${currentTerminalId}`, {
-                method: 'POST'
-            });
-        } catch (e) {}
-        
+        fetch(`/api/terminal/kill/${currentTerminalId}`, {
+            method: 'POST'
+        }).catch(() => {});
         currentTerminalId = null;
     }
-}
-
-function closeTerminal() {
-    closeTerminalConnection();
+    
+    // Dispose xterm
+    if (currentTerminal) {
+        currentTerminal.dispose();
+        currentTerminal = null;
+    }
+    
+    // Hide card
     document.getElementById('terminalCard').style.display = 'none';
 }
-
 
 async function deleteSession(sessionName) {
     if (!confirm(`Delete session ${sessionName}?`)) return;
