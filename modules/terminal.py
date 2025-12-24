@@ -118,6 +118,24 @@ class TerminalManager:
         }
 
 
+    def get_shell_command(self, session_name):
+        """Get command to run shell in tmux session"""
+        # Check if session exists
+        cmd = f"tmux has-session -t {session_name} 2>/dev/null"
+        _, _, code = self._run_command(cmd)
+        
+        if code != 0:
+            return {'success': False, 'error': 'Session does not exist'}
+        
+        # Send a command to the tmux session
+        shell_cmd = f"tmux send-keys -t {session_name}"
+        
+        return {
+            'success': True,
+            'command': shell_cmd,
+            'session_name': session_name
+        }
+            
 # Standalone test
 if __name__ == '__main__':
     print("Testing TerminalManager...")

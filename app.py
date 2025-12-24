@@ -22,6 +22,22 @@ from modules.terminal import TerminalManager
 from modules.docker_mgr import DockerManager
 from modules.app_control import AppController
 
+from flask import Flask, render_template, request, jsonify, session, Response
+from flask_cors import CORS
+import os
+import secrets
+from functools import wraps
+from datetime import timedelta
+import subprocess
+import time
+import json
+import threading
+import queue
+
+
+active_terminals = {}
+
+
 app = Flask(__name__)
 # app.secret_key = secrets.token_hex(32)
 sock = Sock(app)
@@ -291,17 +307,15 @@ def htop_stream():
     
     return Response(generate(), mimetype='text/event-stream')
     
-@sock.route('/api/terminal/ws/<session_name>')
-def terminal_websocket(ws, session_name):
-    # Verify session belongs to user
-    if 'username' not in session:
-        ws.close()
-        return
-    
+@app.route('/api/terminal/connect/<session_name>')
+@login_required
+def connect_terminal(session_name):
     username = session['username']
-    if not session_name.startswith(f"cockpit_{username}_"):
-        ws.close()
-        return
+    
+    # Verify session belongs to user
+    prefix = f"cockpit_{username}_"
+    if not session_name.startswith(prefix):
+        return jsonify({'error': 'Invalid session'}), 403
     
     # Check if session exists
     result = subprocess.run(
@@ -311,56 +325,117 @@ def terminal_websocket(ws, session_name):
     )
     
     if result.returncode != 0:
-        ws.send(json.dumps({'error': 'Session does not exist'}))
-        ws.close()
-        return
+        return jsonify({'error': 'Session does not exist'}), 404
     
-    # Attach to tmux session using pty
+    # Create a unique terminal ID
+    terminal_id = f"{session_name}_{secrets.token_hex(8)}"
+    
+    # Create bash process attached to tmux session
     cmd = f"tmux attach-session -t {session_name}"
     
-    # Create pty
-    pid, fd = pty.fork()
+    # Start the process
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0
+    )
     
-    if pid == 0:
-        # Child process
-        os.execvp("tmux", ["tmux", "attach-session", "-t", session_name])
+    output_queue = queue.Queue()
     
-    # Parent process
-    try:
-        # Set non-blocking
-        flag = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flag | os.O_NONBLOCK)
-        
+    def read_output():
         while True:
-            # Check for data from tmux
-            r, _, _ = select.select([fd], [], [], 0.01)
-            if fd in r:
-                try:
-                    data = os.read(fd, 1024)
-                    if data:
-                        ws.send(data.decode('utf-8', errors='ignore'))
-                    else:
-                        break
-                except OSError:
-                    break
-            
-            # Check for data from websocket
             try:
-                data = ws.receive(timeout=0.01)
-                if data:
-                    os.write(fd, data.encode('utf-8'))
+                char = proc.stdout.read(1)
+                if char:
+                    output_queue.put(char.decode('utf-8', errors='ignore'))
+                else:
+                    break
             except:
-                pass
+                break
+    
+    # Start output reading thread
+    thread = threading.Thread(target=read_output, daemon=True)
+    thread.start()
+    
+    active_terminals[terminal_id] = {
+        'process': proc,
+        'output_queue': output_queue,
+        'thread': thread
+    }
+    
+    return jsonify({'terminal_id': terminal_id, 'success': True})
+
+@app.route('/api/terminal/output/<terminal_id>')
+@login_required
+def terminal_output(terminal_id):
+    if terminal_id not in active_terminals:
+        return jsonify({'error': 'Terminal not found'}), 404
+    
+    def generate():
+        term_data = active_terminals[terminal_id]
+        output_queue = term_data['output_queue']
+        
+        while terminal_id in active_terminals:
+            try:
+                # Get all available output
+                output = ''
+                try:
+                    while True:
+                        output += output_queue.get(timeout=0.1)
+                except queue.Empty:
+                    pass
                 
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-    finally:
-        os.close(fd)
+                if output:
+                    yield f"data: {json.dumps({'output': output})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'ping': True})}\n\n"
+                
+                time.sleep(0.05)
+            except:
+                break
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/api/terminal/input/<terminal_id>', methods=['POST'])
+@login_required
+def terminal_input(terminal_id):
+    if terminal_id not in active_terminals:
+        return jsonify({'error': 'Terminal not found'}), 404
+    
+    data = request.json
+    input_data = data.get('input', '')
+    
+    term_data = active_terminals[terminal_id]
+    proc = term_data['process']
+    
+    try:
+        proc.stdin.write(input_data.encode('utf-8'))
+        proc.stdin.flush()
+        return jsonify({'success': True})
+    except:
+        return jsonify({'error': 'Failed to send input'}), 500
+
+@app.route('/api/terminal/close/<terminal_id>', methods=['POST'])
+@login_required
+def close_terminal(terminal_id):
+    if terminal_id in active_terminals:
+        term_data = active_terminals[terminal_id]
+        proc = term_data['process']
+        
         try:
-            os.kill(pid, 9)
+            proc.terminate()
+            proc.wait(timeout=2)
         except:
-            pass
-            
+            proc.kill()
+        
+        del active_terminals[terminal_id]
+    
+    return jsonify({'success': True})
+
+         
             
 if __name__ == '__main__':
     os.makedirs('config', exist_ok=True)

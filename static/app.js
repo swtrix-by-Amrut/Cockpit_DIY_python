@@ -422,114 +422,126 @@ async function createSession() {
         showToast('Network error: ' + error.message, true);
     }
 }
-let terminalInstance = null;
-let currentSessionName = null;
+
+
+let currentTerminalId = null;
+let terminalEventSource = null;
 
 async function useSession(sessionName) {
     try {
-        const response = await fetch('/api/terminal/attach', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({session_name: sessionName})
+        // Close existing terminal if any
+        if (currentTerminalId) {
+            await closeTerminalConnection();
+        }
+        
+        // Connect to terminal
+        const response = await fetch(`/api/terminal/connect/${sessionName}`, {
+            method: 'GET'
         });
         
         const data = await response.json();
         
+        if (!response.ok) {
+            showToast(data.error || 'Failed to connect', true);
+            return;
+        }
+        
+        currentTerminalId = data.terminal_id;
+        
+        // Show terminal card
+        document.getElementById('terminalCard').style.display = 'block';
+        document.getElementById('activeSessionName').textContent = sessionName;
+        
+        // Create terminal display
+        const container = document.getElementById('terminalContainer');
+        container.innerHTML = `
+            <div id="terminalOutput" style="background: #000; color: #0f0; padding: 10px; 
+                 font-family: 'Courier New', monospace; white-space: pre-wrap; 
+                 overflow-y: auto; height: 540px; font-size: 14px;"></div>
+            <div style="display: flex; gap: 5px; margin-top: 10px;">
+                <input type="text" id="terminalInput" 
+                       style="flex: 1; background: #1a1a1a; color: #0f0; border: 1px solid #444; 
+                              padding: 10px; font-family: 'Courier New', monospace; font-size: 14px;"
+                       placeholder="Type command and press Enter...">
+                <button onclick="sendTerminalInput()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">Send</button>
+            </div>
+        `;
+        
+        // Setup input handler
+        const inputField = document.getElementById('terminalInput');
+        inputField.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendTerminalInput();
+            }
+        });
+        
+        // Focus input
+        inputField.focus();
+        
+        // Start receiving output
+        terminalEventSource = new EventSource(`/api/terminal/output/${currentTerminalId}`);
+        
+        terminalEventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.output) {
+                const output = document.getElementById('terminalOutput');
+                output.textContent += data.output;
+                // Auto-scroll to bottom
+                output.scrollTop = output.scrollHeight;
+            }
+        };
+        
+        terminalEventSource.onerror = function() {
+            showToast('Terminal connection lost', true);
+            closeTerminalConnection();
+        };
+        
+    } catch (error) {
+        showToast('Error: ' + error.message, true);
+    }
+}
+
+async function sendTerminalInput() {
+    const inputField = document.getElementById('terminalInput');
+    const input = inputField.value;
+    
+    if (!input || !currentTerminalId) return;
+    
+    try {
+        const response = await fetch(`/api/terminal/input/${currentTerminalId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({input: input + '\n'})
+        });
+        
         if (response.ok) {
-            currentSessionName = sessionName;
-            
-            // Show terminal card
-            document.getElementById('terminalCard').style.display = 'block';
-            document.getElementById('activeSessionName').textContent = sessionName;
-            
-            // Initialize terminal if not already done
-            if (!terminalInstance) {
-                terminalInstance = new Terminal({
-                    cursorBlink: true,
-                    fontSize: 14,
-                    fontFamily: 'Consolas, Monaco, monospace',
-                    theme: {
-                        background: '#000000',
-                        foreground: '#00ff00',
-                        cursor: '#00ff00'
-                    },
-                    rows: 30,
-                    cols: 120
-                });
-                
-                const container = document.getElementById('terminalContainer');
-                terminalInstance.open(container);
-            }
-            
-            terminalInstance.clear();
-            terminalInstance.writeln('\x1b[1;32m╔════════════════════════════════════════════════════════════════╗\x1b[0m');
-            terminalInstance.writeln('\x1b[1;32m║           PERSISTENT TERMINAL SESSION                          ║\x1b[0m');
-            terminalInstance.writeln('\x1b[1;32m╚════════════════════════════════════════════════════════════════╝\x1b[0m');
-            terminalInstance.writeln('');
-            terminalInstance.writeln(`\x1b[1;33mSession:\x1b[0m ${sessionName}`);
-            terminalInstance.writeln('');
-            terminalInstance.writeln('\x1b[1;36m📋 How to use this terminal session:\x1b[0m');
-            terminalInstance.writeln('');
-            terminalInstance.writeln('  This is a persistent tmux session that will remain active');
-            terminalInstance.writeln('  even after you close this browser window.');
-            terminalInstance.writeln('');
-            terminalInstance.writeln('\x1b[1;35m🔌 Connect via SSH:\x1b[0m');
-            terminalInstance.writeln('');
-            terminalInstance.writeln(`  \x1b[1;32m${data.command}\x1b[0m`);
-            terminalInstance.writeln('');
-            terminalInstance.writeln('\x1b[1;35m💡 Useful tmux commands:\x1b[0m');
-            terminalInstance.writeln('');
-            terminalInstance.writeln('  • \x1b[33mCtrl+B then D\x1b[0m     - Detach from session (session keeps running)');
-            terminalInstance.writeln('  • \x1b[33mCtrl+B then C\x1b[0m     - Create new window in session');
-            terminalInstance.writeln('  • \x1b[33mCtrl+B then N\x1b[0m     - Next window');
-            terminalInstance.writeln('  • \x1b[33mCtrl+B then P\x1b[0m     - Previous window');
-            terminalInstance.writeln('  • \x1b[33mCtrl+B then ?\x1b[0m     - Show all keybindings');
-            terminalInstance.writeln('');
-            terminalInstance.writeln('\x1b[1;31m⚠️  Note:\x1b[0m');
-            terminalInstance.writeln('  Browser-based terminal interaction is limited.');
-            terminalInstance.writeln('  For full terminal functionality, connect via SSH.');
-            terminalInstance.writeln('');
-            terminalInstance.writeln('─'.repeat(80));
-            
-            // Add copy button functionality
-            const copyBtn = document.createElement('button');
-            copyBtn.className = 'btn btn-secondary btn-sm';
-            copyBtn.textContent = '📋 Copy SSH Command';
-            copyBtn.style.position = 'absolute';
-            copyBtn.style.top = '10px';
-            copyBtn.style.right = '120px';
-            copyBtn.onclick = function() {
-                navigator.clipboard.writeText(data.command);
-                copyBtn.textContent = '✓ Copied!';
-                setTimeout(() => {
-                    copyBtn.textContent = '📋 Copy SSH Command';
-                }, 2000);
-            };
-            
-            const titleDiv = document.getElementById('terminalTitle').parentElement;
-            if (!titleDiv.querySelector('.btn-secondary')) {
-                titleDiv.appendChild(copyBtn);
-            }
-            
-        } else {
-            showToast(data.error || 'Failed to get session info', true);
+            inputField.value = '';
         }
     } catch (error) {
-        showToast('Network error: ' + error.message, true);
+        showToast('Failed to send input', true);
+    }
+}
+
+async function closeTerminalConnection() {
+    if (terminalEventSource) {
+        terminalEventSource.close();
+        terminalEventSource = null;
+    }
+    
+    if (currentTerminalId) {
+        try {
+            await fetch(`/api/terminal/close/${currentTerminalId}`, {
+                method: 'POST'
+            });
+        } catch (e) {}
+        
+        currentTerminalId = null;
     }
 }
 
 function closeTerminal() {
+    closeTerminalConnection();
     document.getElementById('terminalCard').style.display = 'none';
-    if (terminalInstance) {
-        terminalInstance.clear();
-    }
-    
-    // Remove copy button
-    const copyBtn = document.querySelector('#terminalTitle').parentElement.querySelector('.btn-secondary');
-    if (copyBtn && copyBtn.textContent.includes('Copy')) {
-        copyBtn.remove();
-    }
 }
 
 
