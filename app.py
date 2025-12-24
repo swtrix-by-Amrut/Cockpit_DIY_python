@@ -152,34 +152,139 @@ def get_processes():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/htop/stream')
+# Add this near the top with other active tracking
+active_htop_sessions = {}
+
+@app.route('/api/htop/start', methods=['POST'])
 @login_required
-def htop_stream():
+def start_htop():
+    username = session['username']
+    
+    # Create unique htop session name
+    htop_session = f"htop_{username}"
+    
+    # Kill existing htop session if any
+    subprocess.run(f"tmux kill-session -t {htop_session} 2>/dev/null", shell=True)
+    
+    # Create new tmux session running htop
+    create_cmd = f"tmux new-session -d -s {htop_session} htop"
+    result = subprocess.run(create_cmd, shell=True, capture_output=True)
+    
+    if result.returncode != 0:
+        return jsonify({'error': 'Failed to start htop'}), 500
+    
+    # Create terminal connection ID
+    terminal_id = f"htop_{username}_{secrets.token_hex(8)}"
+    
+    # Fork PTY and attach to tmux session
+    pid, fd = pty.fork()
+    
+    if pid == 0:
+        # Child process - attach to htop tmux session
+        os.execvp('tmux', ['tmux', 'attach-session', '-t', htop_session])
+    
+    # Parent process
+    active_htop_sessions[terminal_id] = {
+        'pid': pid,
+        'fd': fd,
+        'username': username,
+        'session_name': htop_session
+    }
+    
+    return jsonify({'terminal_id': terminal_id, 'success': True})
+
+@app.route('/api/htop/read/<terminal_id>')
+@login_required
+def htop_read(terminal_id):
+    if terminal_id not in active_htop_sessions:
+        return Response('Terminal not found', status=404)
+    
     def generate():
-        while True:
-            try:
-                result = subprocess.run(
-                    ['top', '-b', '-n', '1', '-w', '200', '-o', '%MEM'],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                    env={'COLUMNS': '200', 'LINES': '50'}
-                )
+        term_data = active_htop_sessions.get(terminal_id)
+        if not term_data:
+            return
+        
+        fd = term_data['fd']
+        
+        try:
+            while terminal_id in active_htop_sessions:
+                r, _, _ = select.select([fd], [], [], 0.1)
                 
-                if result.returncode == 0:
-                    yield f"data: {result.stdout}\n\n"
+                if r:
+                    try:
+                        data = os.read(fd, 4096)
+                        if data:
+                            yield f"data: {json.dumps({'output': data.decode('utf-8', errors='ignore')})}\n\n"
+                        else:
+                            break
+                    except OSError:
+                        break
                 else:
-                    yield f"data: Error: {result.stderr}\n\n"
-                
-                time.sleep(2)
-            except subprocess.TimeoutExpired:
-                yield "data: Command timeout\n\n"
-                time.sleep(2)
-            except Exception as e:
-                yield f"data: Error: {str(e)}\n\n"
-                time.sleep(2)
+                    yield f"data: {json.dumps({'keepalive': True})}\n\n"
+        except:
+            pass
+        finally:
+            if terminal_id in active_htop_sessions:
+                cleanup_htop(terminal_id)
     
     return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/api/htop/write/<terminal_id>', methods=['POST'])
+@login_required
+def htop_write(terminal_id):
+    if terminal_id not in active_htop_sessions:
+        return jsonify({'error': 'Terminal not found'}), 404
+    
+    data = request.json.get('data', '')
+    term_data = active_htop_sessions[terminal_id]
+    fd = term_data['fd']
+    
+    try:
+        os.write(fd, data.encode('utf-8'))
+        return jsonify({'success': True})
+    except:
+        return jsonify({'error': 'Write failed'}), 500
+
+@app.route('/api/htop/resize/<terminal_id>', methods=['POST'])
+@login_required
+def htop_resize(terminal_id):
+    if terminal_id not in active_htop_sessions:
+        return jsonify({'error': 'Terminal not found'}), 404
+    
+    rows = request.json.get('rows', 24)
+    cols = request.json.get('cols', 80)
+    
+    term_data = active_htop_sessions[terminal_id]
+    fd = term_data['fd']
+    
+    try:
+        size = struct.pack('HHHH', rows, cols, 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
+        return jsonify({'success': True})
+    except:
+        return jsonify({'error': 'Resize failed'}), 500
+
+@app.route('/api/htop/stop/<terminal_id>', methods=['POST'])
+@login_required
+def stop_htop(terminal_id):
+    cleanup_htop(terminal_id)
+    return jsonify({'success': True})
+
+def cleanup_htop(terminal_id):
+    if terminal_id in active_htop_sessions:
+        term_data = active_htop_sessions[terminal_id]
+        session_name = term_data['session_name']
+        
+        try:
+            os.close(term_data['fd'])
+            os.kill(term_data['pid'], 15)
+        except:
+            pass
+        
+        # Kill the tmux session
+        subprocess.run(f"tmux kill-session -t {session_name} 2>/dev/null", shell=True)
+        
+        del active_htop_sessions[terminal_id]
 
 # ==================== TERMINAL SESSION MANAGEMENT ====================
 

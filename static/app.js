@@ -291,73 +291,143 @@ async function refreshSystemStats() {
     }
 }
 
-// Processes
+let htopTerminal = null;
+let htopTerminalId = null;
 let htopEventSource = null;
-let htopRunning = false;
-
-function toggleHtop() {
-    if (htopRunning) {
-        stopHtop();
-    } else {
-        startHtop();
-    }
-}
 
 function startHtop() {
     const container = document.getElementById('htopContainer');
     const toggleText = document.getElementById('htopToggleText');
     
     container.style.display = 'block';
-    container.textContent = 'Starting process monitor...';
+    container.innerHTML = '';
     
-    htopEventSource = new EventSource('/api/htop/stream');
+    // Create xterm terminal for htop
+    htopTerminal = new Terminal({
+        cursorBlink: false,
+        fontSize: 13,
+        fontFamily: '"Cascadia Code", Menlo, Monaco, "Courier New", monospace',
+        theme: {
+            background: '#000000',
+            foreground: '#ffffff',
+            cursor: '#ffffff'
+        },
+        rows: 35,
+        cols: 150
+    });
     
-    htopEventSource.onmessage = function(event) {
-        // Clear and update with new data
-        container.textContent = event.data;
-    };
+    htopTerminal.open(container);
     
-    htopEventSource.onerror = function(error) {
-        console.error('EventSource error:', error);
-        container.textContent += '\n\nConnection lost. Click Start to reconnect.';
-        stopHtop();
-    };
-    
-    htopRunning = true;
-    toggleText.textContent = '⏸ Stop';
+    // Start htop session
+    fetch('/api/htop/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            showToast('Failed to start htop', true);
+            return;
+        }
+        
+        htopTerminalId = data.terminal_id;
+        
+        // Handle terminal input (for navigation in htop)
+        htopTerminal.onData(function(data) {
+            fetch(`/api/htop/write/${htopTerminalId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({data: data})
+            });
+        });
+        
+        // Handle resize
+        htopTerminal.onResize(function(size) {
+            fetch(`/api/htop/resize/${htopTerminalId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: size.rows, cols: size.cols})
+            });
+        });
+        
+        // Connect to output stream
+        htopEventSource = new EventSource(`/api/htop/read/${htopTerminalId}`);
+        
+        htopEventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.output) {
+                htopTerminal.write(data.output);
+            }
+        };
+        
+        htopEventSource.onerror = function() {
+            showToast('Htop connection lost', true);
+            stopHtop();
+        };
+        
+        htopTerminal.focus();
+        toggleText.textContent = '⏸ Stop';
+    })
+    .catch(error => {
+        showToast('Error starting htop: ' + error.message, true);
+    });
 }
 
 function stopHtop() {
     const toggleText = document.getElementById('htopToggleText');
     
+    // Close event source
     if (htopEventSource) {
         htopEventSource.close();
         htopEventSource = null;
     }
     
-    htopRunning = false;
-    toggleText.textContent = '▶ Start';
+    // Stop htop session
+    if (htopTerminalId) {
+        fetch(`/api/htop/stop/${htopTerminalId}`, {
+            method: 'POST'
+        }).catch(() => {});
+        htopTerminalId = null;
+    }
+    
+    // Dispose terminal
+    if (htopTerminal) {
+        htopTerminal.dispose();
+        htopTerminal = null;
+    }
     
     const container = document.getElementById('htopContainer');
     container.style.display = 'none';
+    container.innerHTML = '';
+    
+    toggleText.textContent = '▶ Start';
 }
 
-// Keep old function for compatibility but make it use htop
-function refreshProcesses() {
-    // Auto-start htop when page loads
-    if (!htopRunning) {
+function toggleHtop() {
+    if (htopTerminalId) {
+        stopHtop();
+    } else {
         startHtop();
     }
 }
 
-// Clean up on page change
+function refreshProcesses() {
+    // Auto-start htop when page loads
+    if (!htopTerminalId) {
+        startHtop();
+    }
+}
+
+// Update showPage to stop htop when leaving
 const originalShowPage = showPage;
 showPage = function(pageName) {
     // Stop htop when leaving processes page
-    if (htopRunning && pageName !== 'processes') {
+    if (htopTerminalId && pageName !== 'processes') {
         stopHtop();
     }
-    originalShowPage(pageName);
+    
+    // Call original function
+    originalShowPage.call(this, pageName);
 };
 
 // Terminal Sessions
@@ -443,7 +513,7 @@ async function useSession(sessionName) {
         const container = document.getElementById('terminalContainer');
         container.innerHTML = '';
         
-        // Create xterm terminal
+        // Create xterm terminal with proper sizing
         currentTerminal = new Terminal({
             cursorBlink: true,
             fontSize: 14,
@@ -468,12 +538,21 @@ async function useSession(sessionName) {
                 brightMagenta: '#ff00ff',
                 brightCyan: '#00ffff',
                 brightWhite: '#ffffff'
-            },
-            rows: 30,
-            cols: 100
+            }
         });
         
         currentTerminal.open(container);
+        
+        // Make terminal fill container
+        setTimeout(() => {
+            if (currentTerminal) {
+                const dimensions = {
+                    cols: Math.floor(container.offsetWidth / 9),  // Approximate char width
+                    rows: Math.floor(container.offsetHeight / 17) // Approximate char height
+                };
+                currentTerminal.resize(dimensions.cols, dimensions.rows);
+            }
+        }, 100);
         
         // Connect to tmux session
         const response = await fetch('/api/terminal/connect', {
@@ -490,6 +569,15 @@ async function useSession(sessionName) {
         }
         
         currentTerminalId = data.terminal_id;
+        
+        // Send initial resize to match terminal size
+        const cols = currentTerminal.cols;
+        const rows = currentTerminal.rows;
+        fetch(`/api/terminal/resize/${currentTerminalId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({rows: rows, cols: cols})
+        });
         
         // Handle terminal input
         currentTerminal.onData(function(data) {
