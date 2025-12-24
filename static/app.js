@@ -422,6 +422,8 @@ async function createSession() {
         showToast('Network error: ' + error.message, true);
     }
 }
+
+
 let currentTerminal = null;
 let currentTerminalId = null;
 let terminalEventSource = null;
@@ -430,7 +432,7 @@ async function useSession(sessionName) {
     try {
         // Close existing terminal
         if (currentTerminal) {
-            closeTerminal();
+            await closeTerminal();
         }
         
         // Show terminal card
@@ -473,8 +475,8 @@ async function useSession(sessionName) {
         
         currentTerminal.open(container);
         
-        // Start terminal session
-        const response = await fetch('/api/terminal/start', {
+        // Connect to tmux session
+        const response = await fetch('/api/terminal/connect', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({session_name: sessionName})
@@ -483,7 +485,7 @@ async function useSession(sessionName) {
         const data = await response.json();
         
         if (!response.ok) {
-            showToast('Failed to start terminal', true);
+            showToast(data.error || 'Failed to connect', true);
             return;
         }
         
@@ -530,16 +532,16 @@ async function useSession(sessionName) {
     }
 }
 
-function closeTerminal() {
+async function closeTerminal() {
     // Close event source
     if (terminalEventSource) {
         terminalEventSource.close();
         terminalEventSource = null;
     }
     
-    // Kill terminal on server
+    // Disconnect from terminal (tmux session stays alive)
     if (currentTerminalId) {
-        fetch(`/api/terminal/kill/${currentTerminalId}`, {
+        await fetch(`/api/terminal/disconnect/${currentTerminalId}`, {
             method: 'POST'
         }).catch(() => {});
         currentTerminalId = null;
@@ -553,6 +555,8 @@ function closeTerminal() {
     
     // Hide card
     document.getElementById('terminalCard').style.display = 'none';
+    
+    showToast('Disconnected from terminal (session still running)');
 }
 
 async function deleteSession(sessionName) {
