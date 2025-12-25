@@ -321,6 +321,7 @@ def delete_session():
 
 # ==================== PERSISTENT TERMINAL CONNECTION ====================
 
+
 @app.route('/api/terminal/connect', methods=['POST'])
 @login_required
 def connect_terminal():
@@ -343,12 +344,40 @@ def connect_terminal():
     # Create a unique terminal connection ID
     terminal_id = f"{session_name}_{secrets.token_hex(8)}"
     
+    # Get user's home directory and UID/GID
+    import pwd
+    try:
+        user_info = pwd.getpwnam(username)
+        user_home = user_info.pw_dir
+        user_uid = user_info.pw_uid
+        user_gid = user_info.pw_gid
+    except KeyError:
+        return jsonify({'error': f'User {username} not found on system'}), 404
+    
     # Fork a PTY and attach to tmux session
     pid, fd = pty.fork()
     
     if pid == 0:
-        # Child process - attach to tmux session
-        os.execvp('tmux', ['tmux', 'attach-session', '-t', session_name])
+        # Child process - drop privileges and attach to tmux session
+        try:
+            # Change to user's home directory
+            os.chdir(user_home)
+            
+            # Set environment variables
+            os.environ['HOME'] = user_home
+            os.environ['USER'] = username
+            os.environ['LOGNAME'] = username
+            os.environ['SHELL'] = user_info.pw_shell or '/bin/bash'
+            
+            # Drop privileges to the user
+            os.setgid(user_gid)
+            os.setuid(user_uid)
+            
+            # Attach to tmux session
+            os.execvp('tmux', ['tmux', 'attach-session', '-t', session_name])
+        except Exception as e:
+            print(f"Failed to start terminal: {e}")
+            os._exit(1)
     
     # Parent process - store terminal info
     active_terminals[terminal_id] = {
