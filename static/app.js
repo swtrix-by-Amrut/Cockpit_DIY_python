@@ -834,5 +834,46 @@ async function checkSession() {
     }
 }
 
+
+// Generate important links with current host IP
+function generateImportantLinks() {
+    const host = window.location.hostname;
+    
+    const links = [
+        { name: 'Immich', port: 2283 },
+        { name: 'qBittorrent', port: 8080 },
+        { name: 'Mealie', port: 9000 },
+        { name: 'Tiny File Manager', port: 8888 }
+    ];
+    
+    const linksContainer = document.getElementById('importantLinks');
+    if (!linksContainer) return;
+    
+    linksContainer.innerHTML = '';
+    
+    links.forEach(link => {
+        const url = `http://${host}:${link.port}`;
+        const linkElement = document.createElement('a');
+        linkElement.href = url;
+        linkElement.target = '_blank';
+        linkElement.className = 'link-card';
+        linkElement.textContent = link.name;
+        linksContainer.appendChild(linkElement);
+    });
+}
+
+// Call this when storage page loads
+const originalRefreshStorage = refreshStorage;
+refreshStorage = async function() {
+    await originalRefreshStorage();
+    generateImportantLinks();
+};
+
+// Also generate on initial page load
+window.addEventListener('DOMContentLoaded', function() {
+    generateImportantLinks();
+});
+
+
 // Run session check on page load
 checkSession();
